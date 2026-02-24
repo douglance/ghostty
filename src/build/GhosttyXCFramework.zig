@@ -15,6 +15,8 @@ pub fn init(
     deps: *const SharedDeps,
     target: Target,
 ) !GhosttyXCFramework {
+    const include_visionos = deps.config.xcframework_visionos;
+
     // Universal macOS build
     const macos_universal = try GhosttyLib.initMacOSUniversal(b, deps);
 
@@ -43,15 +45,38 @@ pub fn init(
             .os_tag = .ios,
             .os_version_min = Config.osVersionMin(.ios),
             .abi = .simulator,
-
-            // We force the Apple CPU model because the simulator
-            // doesn't support the generic CPU model as of Zig 0.14 due
-            // to missing "altnzcv" instructions, which is false. This
-            // surely can't be right but we can fix this if/when we get
-            // back to running simulator builds.
             .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.apple_a17 },
         }),
     ));
+
+    // visionOS
+    const visionos = if (include_visionos)
+        try GhosttyLib.initStatic(b, &try deps.retarget(
+            b,
+            b.resolveTargetQuery(.{
+                .cpu_arch = .aarch64,
+                .os_tag = .visionos,
+                .os_version_min = Config.osVersionMin(.visionos),
+                .abi = null,
+            }),
+        ))
+    else
+        null;
+
+    // visionOS Simulator
+    const visionos_sim = if (include_visionos)
+        try GhosttyLib.initStatic(b, &try deps.retarget(
+            b,
+            b.resolveTargetQuery(.{
+                .cpu_arch = .aarch64,
+                .os_tag = .visionos,
+                .os_version_min = Config.osVersionMin(.visionos),
+                .abi = .simulator,
+                .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.apple_a17 },
+            }),
+        ))
+    else
+        null;
 
     // Generate a headers directory with only ghostty.h and the module
     // map. We can't use include/ directly because it also contains the
@@ -65,35 +90,76 @@ pub fn init(
 
     // The xcframework wraps our ghostty library so that we can link
     // it to the final app built with Swift.
-    const xcframework = XCFrameworkStep.create(b, .{
-        .name = "GhosttyKit",
-        .out_path = "macos/GhosttyKit.xcframework",
-        .libraries = switch (target) {
-            .universal => &.{
-                .{
-                    .library = macos_universal.output,
-                    .headers = headers,
-                    .dsym = macos_universal.dsym,
+    const xcframework = if (include_visionos)
+        XCFrameworkStep.create(b, .{
+            .name = "GhosttyKit",
+            .out_path = "macos/GhosttyKit.xcframework",
+            .libraries = switch (target) {
+                .universal => &.{
+                    .{
+                        .library = macos_universal.output,
+                        .headers = headers,
+                        .dsym = macos_universal.dsym,
+                    },
+                    .{
+                        .library = ios.output,
+                        .headers = headers,
+                        .dsym = ios.dsym,
+                    },
+                    .{
+                        .library = ios_sim.output,
+                        .headers = headers,
+                        .dsym = ios_sim.dsym,
+                    },
+                    .{
+                        .library = visionos.?.output,
+                        .headers = headers,
+                        .dsym = visionos.?.dsym,
+                    },
+                    .{
+                        .library = visionos_sim.?.output,
+                        .headers = headers,
+                        .dsym = visionos_sim.?.dsym,
+                    },
                 },
-                .{
-                    .library = ios.output,
-                    .headers = headers,
-                    .dsym = ios.dsym,
-                },
-                .{
-                    .library = ios_sim.output,
-                    .headers = headers,
-                    .dsym = ios_sim.dsym,
-                },
-            },
 
-            .native => &.{.{
-                .library = macos_native.output,
-                .headers = headers,
-                .dsym = macos_native.dsym,
-            }},
-        },
-    });
+                .native => &.{.{
+                    .library = macos_native.output,
+                    .headers = headers,
+                    .dsym = macos_native.dsym,
+                }},
+            },
+        })
+    else
+        XCFrameworkStep.create(b, .{
+            .name = "GhosttyKit",
+            .out_path = "macos/GhosttyKit.xcframework",
+            .libraries = switch (target) {
+                .universal => &.{
+                    .{
+                        .library = macos_universal.output,
+                        .headers = headers,
+                        .dsym = macos_universal.dsym,
+                    },
+                    .{
+                        .library = ios.output,
+                        .headers = headers,
+                        .dsym = ios.dsym,
+                    },
+                    .{
+                        .library = ios_sim.output,
+                        .headers = headers,
+                        .dsym = ios_sim.dsym,
+                    },
+                },
+
+                .native => &.{.{
+                    .library = macos_native.output,
+                    .headers = headers,
+                    .dsym = macos_native.dsym,
+                }},
+            },
+        });
 
     return .{
         .xcframework = xcframework,

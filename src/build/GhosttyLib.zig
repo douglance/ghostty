@@ -41,7 +41,7 @@ pub fn initStatic(
     // These must be bundled since we're compiling into a static lib.
     // Otherwise, you get undefined symbol errors.
     lib.bundle_compiler_rt = true;
-    lib.bundle_ubsan_rt = true;
+    lib.bundle_ubsan_rt = deps.config.target.result.os.tag != .visionos;
 
     if (deps.config.target.result.os.tag == .windows) {
         // Zig's ubsan emits /exclude-symbols linker directives that

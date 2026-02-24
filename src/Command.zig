@@ -465,7 +465,7 @@ fn setupFd(src: File.Handle, target: i32) !void {
             // this.
             _ = try PosixCall.f(linux.dup3, .{ src, target, 0 });
         },
-        .freebsd, .ios, .macos => {
+        .freebsd, .ios, .visionos, .macos => {
             // Mac doesn't support dup3 so we use dup2. We purposely clear
             // CLO_ON_EXEC for this fd.
             const flags = try PosixCall.f(posix.system.fcntl, .{ src, posix.F.GETFD });

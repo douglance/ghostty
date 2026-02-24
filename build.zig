@@ -83,7 +83,11 @@ pub fn build(b: *std.Build) !void {
     const i18n = if (config.i18n) try buildpkg.GhosttyI18n.init(b, &config) else null;
 
     // Ghostty executable, the actual runnable Ghostty program.
-    const exe = try buildpkg.GhosttyExe.init(b, &config, &deps);
+    // Skip exe init for platforms that don't support it (e.g., visionOS).
+    const exe = if (config.app_runtime != .none)
+        try buildpkg.GhosttyExe.init(b, &config, &deps)
+    else
+        null;
 
     // Ghostty docs
     const docs = try buildpkg.GhosttyDocs.init(b, &deps);
@@ -177,7 +181,7 @@ pub fn build(b: *std.Build) !void {
     // Runtime "none" is libghostty, anything else is an executable.
     if (config.app_runtime != .none) {
         if (config.emit_exe) {
-            exe.install();
+            if (exe) |e| e.install();
             resources.install();
             if (i18n) |v| v.install();
         }
@@ -244,7 +248,7 @@ pub fn build(b: *std.Build) !void {
     // Run step
     run: {
         if (config.app_runtime != .none) {
-            const run_cmd = b.addRunArtifact(exe.exe);
+            const run_cmd = b.addRunArtifact((exe orelse break :run).exe);
             if (b.args) |args| run_cmd.addArgs(args);
 
             // Set the proper resources dir so things like shell integration

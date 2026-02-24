@@ -16,8 +16,8 @@ pub inline fn home(environ_map: *const std.process.Environ.Map, buf: []u8) !?[]c
         .linux, .freebsd, .macos => try homeUnix(environ_map, buf),
         .windows => homeWindows(environ_map, buf) catch return error.BufferTooSmall,
 
-        // iOS doesn't have a user-writable home directory
-        .ios => null,
+        // iOS/visionOS don't expose a standard user home directory model.
+        .ios, .visionos => null,
 
         else => @compileError("unimplemented"),
     };
@@ -104,9 +104,8 @@ pub fn expandHome(environ_map: *const std.process.Environ.Map, path: []const u8,
         // `~/` is not an idiom generally used on Windows
         .windows => return path,
 
-        // iOS doesn't have a user-writable home directory
-        .ios => return path,
-
+        // iOS/visionOS don't have a user-writable home directory
+        .ios, .visionos => return path,
         else => @compileError("unimplemented"),
     };
 }

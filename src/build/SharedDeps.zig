@@ -139,6 +139,14 @@ fn initTarget(
     const config = try b.allocator.create(Config);
     config.* = self.config.*;
     config.target = target;
+
+    // Some build options are target-dependent but inherited during retarget.
+    // Normalize visionOS to the supported subset.
+    if (target.result.os.tag == .visionos) {
+        config.sentry = false;
+        config.simd = false;
+    }
+
     self.config = config;
 
     // Setup our shared build options
@@ -498,11 +506,12 @@ pub fn add(
     if (step.rootModuleTarget().os.tag.isDarwin()) {
         try @import("apple_sdk").addPaths(b, step);
 
-        const metallib = self.metallib.?;
-        metallib.output.addStepDependencies(&step.step);
-        step.root_module.addAnonymousImport("ghostty_metallib", .{
-            .root_source_file = metallib.output,
-        });
+        if (self.metallib) |metallib| {
+            metallib.output.addStepDependencies(&step.step);
+            step.root_module.addAnonymousImport("ghostty_metallib", .{
+                .root_source_file = metallib.output,
+            });
+        }
     }
 
     // Other dependencies, mostly pure Zig
