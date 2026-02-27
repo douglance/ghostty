@@ -79,6 +79,10 @@ pub const App = struct {
 
         /// Close the current surface given by this function.
         close_surface: ?*const fn (SurfaceUD, bool) callconv(.c) void = null,
+
+        /// Write bytes that should be sent to the host-managed transport.
+        /// This is used by external termio backends (for example on visionOS).
+        termio_write: ?*const fn (SurfaceUD, [*]const u8, usize) callconv(.c) void = null,
     };
 
     /// This is the key event sent for ghostty_surface_key and
@@ -342,6 +346,179 @@ pub const App = struct {
     }
 };
 
+fn normalizeScriptInputOwned(
+    alloc: Allocator,
+    bytes: []const u8,
+) ![]u8 {
+    var normalized = try std.ArrayList(u8).initCapacity(
+        alloc,
+        bytes.len + 1,
+    );
+    defer normalized.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        const byte = bytes[i];
+        switch (byte) {
+            '\r' => {
+                try normalized.append(alloc, '\r');
+
+                // Collapse CRLF to a single CR.
+                if (i + 1 < bytes.len and bytes[i + 1] == '\n') i += 1;
+            },
+
+            '\n' => try normalized.append(alloc, '\r'),
+            else => try normalized.append(alloc, byte),
+        }
+    }
+
+    // Simulate pressing Enter so the last line executes.
+    if (normalized.items.len == 0 or normalized.items[normalized.items.len - 1] != '\r') {
+        try normalized.append(alloc, '\r');
+    }
+
+    return try normalized.toOwnedSlice(alloc);
+}
+
+test "embedded external command input appends carriage return" {
+    const testing = std.testing;
+
+    const raw = try Surface.externalCommandToInputRaw(
+        testing.allocator,
+        "bash /tmp/script.sh",
+    );
+    defer testing.allocator.free(raw);
+
+    var io: configpkg.io.ReadableIO = .{ .raw = raw };
+    const parsed = try io.cloneParsed(testing.allocator);
+    defer switch (parsed) {
+        .raw => |v| testing.allocator.free(v),
+        .path => |v| testing.allocator.free(v),
+    };
+
+    try testing.expect(parsed == .raw);
+    try testing.expectEqualStrings("bash /tmp/script.sh\r", parsed.raw);
+}
+
+test "embedded external command input trims trailing newlines" {
+    const testing = std.testing;
+
+    const raw = try Surface.externalCommandToInputRaw(
+        testing.allocator,
+        "echo hello\r\n",
+    );
+    defer testing.allocator.free(raw);
+
+    var io: configpkg.io.ReadableIO = .{ .raw = raw };
+    const parsed = try io.cloneParsed(testing.allocator);
+    defer switch (parsed) {
+        .raw => |v| testing.allocator.free(v),
+        .path => |v| testing.allocator.free(v),
+    };
+
+    try testing.expect(parsed == .raw);
+    try testing.expectEqualStrings("echo hello\r", parsed.raw);
+}
+
+test "embedded external command input preserves backslashes" {
+    const testing = std.testing;
+
+    const raw = try Surface.externalCommandToInputRaw(
+        testing.allocator,
+        "bash C:\\temp\\script.sh",
+    );
+    defer testing.allocator.free(raw);
+
+    var io: configpkg.io.ReadableIO = .{ .raw = raw };
+    const parsed = try io.cloneParsed(testing.allocator);
+    defer switch (parsed) {
+        .raw => |v| testing.allocator.free(v),
+        .path => |v| testing.allocator.free(v),
+    };
+
+    try testing.expect(parsed == .raw);
+    try testing.expectEqualStrings("bash C:\\temp\\script.sh\r", parsed.raw);
+}
+
+test "normalize script input converts LF and CRLF to CR" {
+    const testing = std.testing;
+
+    const normalized = try normalizeScriptInputOwned(
+        testing.allocator,
+        "echo one\nprintf two\r\necho three\r",
+    );
+    defer testing.allocator.free(normalized);
+
+    try testing.expectEqualStrings(
+        "echo one\rprintf two\recho three\r",
+        normalized,
+    );
+}
+
+test "normalize script input appends trailing carriage return" {
+    const testing = std.testing;
+
+    const normalized = try normalizeScriptInputOwned(
+        testing.allocator,
+        "echo hello",
+    );
+    defer testing.allocator.free(normalized);
+
+    try testing.expectEqualStrings("echo hello\r", normalized);
+}
+
+test "normalize script input handles heredoc body" {
+    const testing = std.testing;
+
+    const script =
+        "cat <<'EOF'\n" ++
+        "line one\n" ++
+        "$HOME stays literal\n" ++
+        "EOF\n";
+    const normalized = try normalizeScriptInputOwned(testing.allocator, script);
+    defer testing.allocator.free(normalized);
+
+    try testing.expectEqualStrings(
+        "cat <<'EOF'\rline one\r$HOME stays literal\rEOF\r",
+        normalized,
+    );
+}
+
+test "normalize script input handles loops and quotes" {
+    const testing = std.testing;
+
+    const script =
+        "for n in 1 2 3; do\n" ++
+        "  printf \"n=%s\\\\n\" \"$n\"\n" ++
+        "done";
+    const normalized = try normalizeScriptInputOwned(testing.allocator, script);
+    defer testing.allocator.free(normalized);
+
+    try testing.expectEqualStrings(
+        "for n in 1 2 3; do\r  printf \"n=%s\\\\n\" \"$n\"\rdone\r",
+        normalized,
+    );
+}
+
+test "normalize script input keeps blank and comment lines" {
+    const testing = std.testing;
+
+    const script =
+        "#!/usr/bin/env bash\n" ++
+        "\n" ++
+        "echo start\n" ++
+        "\n" ++
+        "# comment line\n" ++
+        "echo end\r\n";
+    const normalized = try normalizeScriptInputOwned(testing.allocator, script);
+    defer testing.allocator.free(normalized);
+
+    try testing.expectEqualStrings(
+        "#!/usr/bin/env bash\r\recho start\r\r# comment line\recho end\r",
+        normalized,
+    );
+}
+
 /// Platform-specific configuration for libghostty.
 pub const Platform = union(PlatformTag) {
     macos: MacOS,
@@ -504,6 +681,8 @@ pub const Surface = struct {
         // Shallow copy the config so that we can modify it.
         var config = try apprt.surface.newConfig(app.core_app, &app.config, opts.context);
         defer config.deinit();
+        const use_external_termio = self.hasExternalTermio();
+        var external_command_input: ?[:0]const u8 = null;
 
         // If we have a working directory from the options then we set it.
         if (opts.working_directory) |c_wd| {
@@ -550,8 +729,24 @@ pub const Surface = struct {
         if (opts.command) |c_command| {
             const cmd = std.mem.sliceTo(c_command, 0);
             if (cmd.len > 0) {
-                config.command = .{ .shell = cmd };
+                // Parse command syntax so callers can opt into direct mode
+                // with the existing `direct:` prefix.
+                var parsed: configpkg.Command = undefined;
+                parsed.parseCLI(config.arenaAlloc(), cmd) catch |err| {
+                    log.warn(
+                        "failed to parse embedded command, falling back to shell mode cmd={s} err={}",
+                        .{ cmd, err },
+                    );
+                    parsed = .{ .shell = cmd };
+                };
+                config.command = parsed;
                 config.@"wait-after-command" = true;
+
+                // For host-managed termio, queue the requested command as the
+                // first input line so the pseudo shell executes it immediately.
+                if (use_external_termio) {
+                    external_command_input = try parsed.string(config.arenaAlloc());
+                }
             }
         }
 
@@ -594,6 +789,12 @@ pub const Surface = struct {
             config.@"wait-after-command" = true;
         }
 
+        if (external_command_input) |cmd| {
+            const alloc = config.arenaAlloc();
+            const raw = try externalCommandToInputRaw(alloc, cmd);
+            try config.input.list.insert(alloc, 0, .{ .raw = raw });
+        }
+
         // Initialize our surface right away. We're given a view that is
         // ready to use.
         try self.core_surface.init(
@@ -611,6 +812,23 @@ pub const Surface = struct {
             font_size.points = opts.font_size;
             try self.core_surface.setFontSize(font_size);
         }
+    }
+
+    fn externalCommandToInputRaw(
+        alloc: Allocator,
+        command: []const u8,
+    ) ![:0]const u8 {
+        const trimmed = std.mem.trimRight(u8, command, "\r\n");
+
+        var line = try alloc.alloc(u8, trimmed.len + 1);
+        defer alloc.free(line);
+        @memcpy(line[0..trimmed.len], trimmed);
+        line[trimmed.len] = '\r';
+
+        var escaped: std.Io.Writer.Allocating = .init(alloc);
+        defer escaped.deinit();
+        try std.zig.stringEscape(line, &escaped.writer);
+        return try escaped.toOwnedSliceSentinel(0);
     }
 
     pub fn deinit(self: *Surface) void {
@@ -664,6 +882,16 @@ pub const Surface = struct {
         };
 
         func(self.userdata, process_alive);
+    }
+
+    pub fn termioWrite(self: *const Surface, bytes: []const u8) void {
+        const func = self.app.opts.termio_write orelse return;
+        if (bytes.len == 0) return;
+        func(self.userdata, bytes.ptr, bytes.len);
+    }
+
+    pub fn hasExternalTermio(self: *const Surface) bool {
+        return self.app.opts.termio_write != null;
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -1322,6 +1550,82 @@ pub const CAPI = struct {
         }
     };
 
+    const FrameColor = extern struct {
+        tag: Tag = .default,
+        palette_index: u8 = 0,
+        r: u8 = 0,
+        g: u8 = 0,
+        b: u8 = 0,
+
+        const Tag = enum(c_int) {
+            default = 0,
+            palette = 1,
+            rgb = 2,
+        };
+    };
+
+    const FrameCell = extern struct {
+        codepoint: u32 = 0,
+        extra_codepoints: [3]u32 = .{ 0, 0, 0 },
+        extra_len: u8 = 0,
+        width: u8 = 1,
+        foreground: FrameColor = .{},
+        background: FrameColor = .{},
+        attributes: u16 = 0,
+    };
+
+    const FrameCursorStyle = enum(c_int) {
+        bar = 0,
+        block = 1,
+        underline = 2,
+        hollow_block = 3,
+    };
+
+    const FrameMouseEvent = enum(c_int) {
+        none = 0,
+        x10 = 1,
+        normal = 2,
+        button = 3,
+        any = 4,
+    };
+
+    const FrameMouseFormat = enum(c_int) {
+        x10 = 0,
+        utf8 = 1,
+        sgr = 2,
+        urxvt = 3,
+        sgr_pixels = 4,
+    };
+
+    const Frame = extern struct {
+        columns: u16 = 0,
+        rows: u16 = 0,
+        scrollback_rows: usize = 0,
+        cells: ?[*]FrameCell = null,
+        cells_len: usize = 0,
+        line_wrapped: ?[*]u8 = null,
+        line_wrapped_len: usize = 0,
+        cursor_column: u16 = 0,
+        cursor_row: u16 = 0,
+        cursor_visible: bool = true,
+        cursor_blinking: bool = false,
+        cursor_style: FrameCursorStyle = .block,
+        is_alternate_screen: bool = false,
+        mouse_event: FrameMouseEvent = .none,
+        mouse_format: FrameMouseFormat = .x10,
+
+        pub fn deinit(self: *Frame) void {
+            const alloc = global.alloc();
+            if (self.cells) |ptr| {
+                alloc.free(ptr[0..self.cells_len]);
+            }
+            if (self.line_wrapped) |ptr| {
+                alloc.free(ptr[0..self.line_wrapped_len]);
+            }
+            self.* = .{};
+        }
+    };
+
     // ghostty_point_s
     const Point = extern struct {
         tag: Tag,
@@ -1692,6 +1996,203 @@ pub const CAPI = struct {
         ptr.deinit();
     }
 
+    inline fn frameColorFromStyle(color_value: terminal.Style.Color) FrameColor {
+        return switch (color_value) {
+            .none => .{ .tag = .default },
+            .palette => |idx| .{
+                .tag = .palette,
+                .palette_index = idx,
+            },
+            .rgb => |rgb| .{
+                .tag = .rgb,
+                .r = rgb.r,
+                .g = rgb.g,
+                .b = rgb.b,
+            },
+        };
+    }
+
+    inline fn frameBackgroundColor(
+        style_bg: terminal.Style.Color,
+        cell: terminal.Cell,
+    ) FrameColor {
+        return switch (cell.content_tag) {
+            .bg_color_palette => .{
+                .tag = .palette,
+                .palette_index = cell.content.color_palette,
+            },
+            .bg_color_rgb => .{
+                .tag = .rgb,
+                .r = cell.content.color_rgb.r,
+                .g = cell.content.color_rgb.g,
+                .b = cell.content.color_rgb.b,
+            },
+            else => frameColorFromStyle(style_bg),
+        };
+    }
+
+    inline fn frameAttributes(
+        style_value: terminal.Style,
+        cell: terminal.Cell,
+    ) u16 {
+        var attrs: u16 = 0;
+        if (style_value.flags.bold) attrs |= (1 << 0);
+        if (style_value.flags.faint) attrs |= (1 << 1);
+        if (style_value.flags.italic) attrs |= (1 << 2);
+        if (style_value.flags.underline != .none) attrs |= (1 << 3);
+        if (style_value.flags.blink) attrs |= (1 << 4);
+        if (style_value.flags.inverse) attrs |= (1 << 6);
+        if (style_value.flags.invisible) attrs |= (1 << 7);
+        if (style_value.flags.strikethrough) attrs |= (1 << 8);
+        if (cell.protected) attrs |= (1 << 9);
+        return attrs;
+    }
+
+    inline fn frameCellWidth(cell: terminal.Cell) u8 {
+        return switch (cell.wide) {
+            .narrow => 1,
+            .wide => 2,
+            .spacer_head,
+            .spacer_tail,
+            => 0,
+        };
+    }
+
+    inline fn frameCursorStyle(value: terminal.CursorStyle) FrameCursorStyle {
+        return switch (value) {
+            .bar => .bar,
+            .block => .block,
+            .underline => .underline,
+            .block_hollow => .hollow_block,
+        };
+    }
+
+    inline fn frameMouseEvent(value: terminal.Terminal.MouseEvents) FrameMouseEvent {
+        return switch (value) {
+            .none => .none,
+            .x10 => .x10,
+            .normal => .normal,
+            .button => .button,
+            .any => .any,
+        };
+    }
+
+    inline fn frameMouseFormat(value: terminal.Terminal.MouseFormat) FrameMouseFormat {
+        return switch (value) {
+            .x10 => .x10,
+            .utf8 => .utf8,
+            .sgr => .sgr,
+            .urxvt => .urxvt,
+            .sgr_pixels => .sgr_pixels,
+        };
+    }
+
+    /// Read full screen frame state from the active surface screen.
+    ///
+    /// The resulting rows are ordered top-to-bottom for the full screen
+    /// history: scrollback rows first, then active rows.
+    export fn ghostty_surface_read_frame(
+        surface: *Surface,
+        result: *Frame,
+    ) bool {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lockUncancelable(global.io());
+        defer core_surface.renderer_state.mutex.unlock(global.io());
+
+        const t: *terminal.Terminal = core_surface.renderer_state.terminal;
+        const screen: *terminal.Screen = t.screens.active;
+        const cols: usize = screen.pages.cols;
+        if (cols == 0) return false;
+
+        var total_rows: usize = 0;
+        var count_it = screen.pages.rowIterator(
+            .right_down,
+            .{ .screen = .{} },
+            null,
+        );
+        while (count_it.next()) |_| total_rows += 1;
+
+        if (total_rows == 0) return false;
+        const cells_len = std.math.mul(usize, total_rows, cols) catch return false;
+
+        const alloc = global.alloc();
+        var cells = alloc.alloc(FrameCell, cells_len) catch return false;
+        errdefer alloc.free(cells);
+
+        var line_wrapped = alloc.alloc(u8, total_rows) catch return false;
+        errdefer alloc.free(line_wrapped);
+
+        var row_index: usize = 0;
+        var row_it = screen.pages.rowIterator(
+            .right_down,
+            .{ .screen = .{} },
+            null,
+        );
+        while (row_it.next()) |pin| : (row_index += 1) {
+            const page = &pin.node.data;
+            const rac = pin.rowAndCell();
+            const row = rac.row;
+            line_wrapped[row_index] = @intFromBool(row.wrap);
+
+            const row_cells = row.cells.ptr(page.memory)[0..cols];
+            for (row_cells, 0..) |*cell, col| {
+                const style_value: terminal.Style = if (cell.style_id > 0)
+                    page.styles.get(page.memory, cell.style_id).*
+                else
+                    .{};
+
+                var frame_cell: FrameCell = .{
+                    .codepoint = cell.codepoint(),
+                    .extra_codepoints = .{ 0, 0, 0 },
+                    .extra_len = 0,
+                    .width = frameCellWidth(cell.*),
+                    .foreground = frameColorFromStyle(style_value.fg_color),
+                    .background = frameBackgroundColor(style_value.bg_color, cell.*),
+                    .attributes = frameAttributes(style_value, cell.*),
+                };
+
+                if (cell.content_tag == .codepoint_grapheme) {
+                    if (page.lookupGrapheme(cell)) |extras| {
+                        const n = @min(extras.len, frame_cell.extra_codepoints.len);
+                        for (0..n) |i| frame_cell.extra_codepoints[i] = extras[i];
+                        frame_cell.extra_len = @intCast(n);
+                    }
+                }
+
+                cells[row_index * cols + col] = frame_cell;
+            }
+        }
+
+        const cursor_col: u16 = std.math.cast(u16, screen.cursor.x) orelse std.math.maxInt(u16);
+        const cursor_row: u16 = std.math.cast(u16, screen.cursor.y) orelse std.math.maxInt(u16);
+        const active_rows: usize = screen.pages.rows;
+        const scrollback_rows: usize = total_rows -| active_rows;
+
+        result.* = .{
+            .columns = @intCast(cols),
+            .rows = @intCast(active_rows),
+            .scrollback_rows = scrollback_rows,
+            .cells = cells.ptr,
+            .cells_len = cells_len,
+            .line_wrapped = line_wrapped.ptr,
+            .line_wrapped_len = total_rows,
+            .cursor_column = cursor_col,
+            .cursor_row = cursor_row,
+            .cursor_visible = t.modes.get(.cursor_visible),
+            .cursor_blinking = t.modes.get(.cursor_blinking),
+            .cursor_style = frameCursorStyle(screen.cursor.cursor_style),
+            .is_alternate_screen = t.screens.active_key == .alternate,
+            .mouse_event = frameMouseEvent(t.flags.mouse_event),
+            .mouse_format = frameMouseFormat(t.flags.mouse_format),
+        };
+
+        return true;
+    }
+
+    export fn ghostty_surface_free_frame(_: *Surface, ptr: *Frame) void {
+        ptr.deinit();
+    }
+
     /// Tell the surface that it needs to schedule a render
     export fn ghostty_surface_refresh(surface: *Surface) void {
         surface.refresh();
@@ -1814,6 +2315,49 @@ pub const CAPI = struct {
         ) orelse return false;
         if (c_flags) |ptr| ptr.* = flags.cval();
         return true;
+    }
+
+    /// Write raw input bytes to the surface backend.
+    export fn ghostty_surface_write_input(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        surface.core_surface.writeInput(ptr[0..len]) catch |err| {
+            log.warn("error writing raw input err={}", .{err});
+        };
+    }
+
+    /// Feed output bytes into the surface terminal parser.
+    export fn ghostty_surface_process_output(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        surface.core_surface.feedOutput(ptr[0..len]);
+    }
+
+    /// Send a multiline script to the active shell transport.
+    ///
+    /// This converts Unix/Windows line endings to carriage returns and
+    /// appends a trailing carriage return so the final line executes.
+    export fn ghostty_surface_write_script(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        if (len == 0) return;
+
+        const alloc = surface.app.core_app.alloc;
+        const normalized = normalizeScriptInputOwned(alloc, ptr[0..len]) catch |err| {
+            log.warn("error normalizing script input err={}", .{err});
+            return;
+        };
+        defer alloc.free(normalized);
+
+        surface.core_surface.writeInput(normalized) catch |err| {
+            log.warn("error writing script input err={}", .{err});
+        };
     }
 
     /// Send raw text to the terminal. This is treated like a paste

@@ -1841,7 +1841,7 @@ fn execCommand(
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set, a login shell, and proper
     // hushlogin behavior.
-    if (comptime builtin.target.os.tag.isDarwin()) darwin: {
+    if (comptime builtin.target.os.tag == .macos) darwin: {
         const passwd = passwdpkg.get(alloc) catch |err| {
             log.warn("failed to read passwd, not using a login shell err={}", .{err});
             break :darwin;

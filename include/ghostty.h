@@ -416,6 +416,71 @@ typedef struct {
 } ghostty_text_s;
 
 typedef enum {
+  GHOSTTY_FRAME_COLOR_DEFAULT = 0,
+  GHOSTTY_FRAME_COLOR_PALETTE = 1,
+  GHOSTTY_FRAME_COLOR_RGB = 2,
+} ghostty_frame_color_tag_e;
+
+typedef struct {
+  ghostty_frame_color_tag_e tag;
+  uint8_t palette_index;
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+} ghostty_frame_color_s;
+
+typedef struct {
+  uint32_t codepoint;
+  uint32_t extra_codepoints[3];
+  uint8_t extra_len;
+  uint8_t width;
+  ghostty_frame_color_s foreground;
+  ghostty_frame_color_s background;
+  uint16_t attributes;
+} ghostty_frame_cell_s;
+
+typedef enum {
+  GHOSTTY_FRAME_CURSOR_BAR = 0,
+  GHOSTTY_FRAME_CURSOR_BLOCK = 1,
+  GHOSTTY_FRAME_CURSOR_UNDERLINE = 2,
+  GHOSTTY_FRAME_CURSOR_HOLLOW_BLOCK = 3,
+} ghostty_frame_cursor_style_e;
+
+typedef enum {
+  GHOSTTY_FRAME_MOUSE_EVENT_NONE = 0,
+  GHOSTTY_FRAME_MOUSE_EVENT_X10 = 1,
+  GHOSTTY_FRAME_MOUSE_EVENT_NORMAL = 2,
+  GHOSTTY_FRAME_MOUSE_EVENT_BUTTON = 3,
+  GHOSTTY_FRAME_MOUSE_EVENT_ANY = 4,
+} ghostty_frame_mouse_event_e;
+
+typedef enum {
+  GHOSTTY_FRAME_MOUSE_FORMAT_X10 = 0,
+  GHOSTTY_FRAME_MOUSE_FORMAT_UTF8 = 1,
+  GHOSTTY_FRAME_MOUSE_FORMAT_SGR = 2,
+  GHOSTTY_FRAME_MOUSE_FORMAT_URXVT = 3,
+  GHOSTTY_FRAME_MOUSE_FORMAT_SGR_PIXELS = 4,
+} ghostty_frame_mouse_format_e;
+
+typedef struct {
+  uint16_t columns;
+  uint16_t rows;
+  uintptr_t scrollback_rows;
+  const ghostty_frame_cell_s* cells;
+  uintptr_t cells_len;
+  const uint8_t* line_wrapped;
+  uintptr_t line_wrapped_len;
+  uint16_t cursor_column;
+  uint16_t cursor_row;
+  bool cursor_visible;
+  bool cursor_blinking;
+  ghostty_frame_cursor_style_e cursor_style;
+  bool is_alternate_screen;
+  ghostty_frame_mouse_event_e mouse_event;
+  ghostty_frame_mouse_format_e mouse_format;
+} ghostty_surface_frame_s;
+
+typedef enum {
   GHOSTTY_POINT_ACTIVE,
   GHOSTTY_POINT_VIEWPORT,
   GHOSTTY_POINT_SCREEN,
@@ -1018,6 +1083,7 @@ typedef void (*ghostty_runtime_write_clipboard_cb)(void*,
                                                    size_t,
                                                    bool);
 typedef void (*ghostty_runtime_close_surface_cb)(void*, bool);
+typedef void (*ghostty_runtime_termio_write_cb)(void*, const uint8_t*, size_t);
 typedef bool (*ghostty_runtime_action_cb)(ghostty_app_t,
                                           ghostty_target_s,
                                           ghostty_action_s);
@@ -1031,6 +1097,7 @@ typedef struct {
   ghostty_runtime_confirm_read_clipboard_cb confirm_read_clipboard_cb;
   ghostty_runtime_write_clipboard_cb write_clipboard_cb;
   ghostty_runtime_close_surface_cb close_surface_cb;
+  ghostty_runtime_termio_write_cb termio_write_cb;
 } ghostty_runtime_config_s;
 
 // apprt.ipc.Target.Key
@@ -1132,6 +1199,9 @@ GHOSTTY_API bool ghostty_surface_key(ghostty_surface_t, ghostty_input_key_s);
 GHOSTTY_API bool ghostty_surface_key_is_binding(ghostty_surface_t,
                                                    ghostty_input_key_s,
                                                    ghostty_binding_flags_e*);
+GHOSTTY_API void ghostty_surface_write_input(ghostty_surface_t, const uint8_t*, uintptr_t);
+GHOSTTY_API void ghostty_surface_process_output(ghostty_surface_t, const uint8_t*, uintptr_t);
+GHOSTTY_API void ghostty_surface_write_script(ghostty_surface_t, const uint8_t*, uintptr_t);
 GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API bool ghostty_surface_mouse_captured(ghostty_surface_t);
@@ -1167,7 +1237,9 @@ GHOSTTY_API bool ghostty_surface_read_selection(ghostty_surface_t, ghostty_text_
 GHOSTTY_API bool ghostty_surface_read_text(ghostty_surface_t,
                                               ghostty_selection_s,
                                               ghostty_text_s*);
+GHOSTTY_API bool ghostty_surface_read_frame(ghostty_surface_t, ghostty_surface_frame_s*);
 GHOSTTY_API void ghostty_surface_free_text(ghostty_surface_t, ghostty_text_s*);
+GHOSTTY_API void ghostty_surface_free_frame(ghostty_surface_t, ghostty_surface_frame_s*);
 
 #ifdef __APPLE__
 GHOSTTY_API void ghostty_surface_set_display_id(ghostty_surface_t, uint32_t);
