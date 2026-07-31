@@ -102,6 +102,46 @@ pub inline fn renderPass(
     });
 }
 
+/// Copy a complete texture into another texture on this frame's command
+/// buffer. Used only as a safety fallback when a host post-process callback
+/// declines a frame after Ghostty rendered into an intermediate texture.
+pub inline fn copyTexture(
+    self: *const Self,
+    source: objc.Object,
+    destination: objc.Object,
+    width: usize,
+    height: usize,
+) void {
+    const encoder = self.buffer.msgSend(
+        objc.Object,
+        objc.sel("blitCommandEncoder"),
+        .{},
+    );
+    encoder.msgSend(
+        void,
+        objc.sel(
+            "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:" ++
+                "toTexture:destinationSlice:destinationLevel:destinationOrigin:",
+        ),
+        .{
+            source,
+            @as(c_ulong, 0),
+            @as(c_ulong, 0),
+            mtl.MTLOrigin{ .x = 0, .y = 0, .z = 0 },
+            mtl.MTLSize{
+                .width = @intCast(width),
+                .height = @intCast(height),
+                .depth = 1,
+            },
+            destination,
+            @as(c_ulong, 0),
+            @as(c_ulong, 0),
+            mtl.MTLOrigin{ .x = 0, .y = 0, .z = 0 },
+        },
+    );
+    encoder.msgSend(void, objc.sel("endEncoding"), .{});
+}
+
 /// Complete this frame and present the target.
 ///
 /// If `sync` is true, this will block until the frame is presented.

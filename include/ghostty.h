@@ -1084,6 +1084,21 @@ typedef void (*ghostty_runtime_write_clipboard_cb)(void*,
                                                    bool);
 typedef void (*ghostty_runtime_close_surface_cb)(void*, bool);
 typedef void (*ghostty_runtime_termio_write_cb)(void*, const uint8_t*, size_t);
+// Metal renderer hook for host-owned post-processing. The host may encode
+// work into command_buffer using source_texture and destination_texture, but
+// Ghostty owns the command buffer lifecycle: the callback must not commit or
+// wait on it. Return false to let Ghostty blit source_texture to destination.
+typedef struct {
+  void* command_buffer;
+  void* source_texture;
+  void* destination_texture;
+  uint32_t width;
+  uint32_t height;
+  uint64_t frame_number;
+} ghostty_metal_postprocess_frame_s;
+typedef bool (*ghostty_runtime_metal_postprocess_cb)(
+    void*,
+    const ghostty_metal_postprocess_frame_s*);
 typedef bool (*ghostty_runtime_action_cb)(ghostty_app_t,
                                           ghostty_target_s,
                                           ghostty_action_s);
@@ -1098,6 +1113,7 @@ typedef struct {
   ghostty_runtime_write_clipboard_cb write_clipboard_cb;
   ghostty_runtime_close_surface_cb close_surface_cb;
   ghostty_runtime_termio_write_cb termio_write_cb;
+  ghostty_runtime_metal_postprocess_cb metal_postprocess_cb;
 } ghostty_runtime_config_s;
 
 // apprt.ipc.Target.Key

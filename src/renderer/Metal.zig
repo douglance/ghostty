@@ -128,6 +128,14 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
 
         .ios, .visionos => {
             const view_layer = objc.Object.fromId(info.view.getProperty(?*anyopaque, "layer"));
+            layer.layer.setProperty(
+                "frame",
+                info.view.getProperty(graphics.Rect, "bounds"),
+            );
+            layer.layer.setProperty(
+                "autoresizingMask",
+                @as(c_ulong, (1 << 1) | (1 << 4)),
+            );
             view_layer.msgSend(void, objc.sel("addSublayer:"), .{layer.layer.value});
         },
 
@@ -406,6 +414,37 @@ pub inline fn beginFrame(
     target: *Target,
 ) !Frame {
     return try Frame.begin(.{ .queue = self.queue }, renderer, target);
+}
+
+/// Give an embedded host a chance to encode a post-process pass into the
+/// command buffer that owns this frame. The callback must not commit or wait
+/// on the command buffer; Ghostty retains ownership of frame completion.
+pub inline fn hostPostprocess(
+    self: *const Metal,
+    frame: *const Frame,
+    source: Texture,
+    target: *const Target,
+    surface: *apprt.Surface,
+    frame_number: u64,
+) bool {
+    _ = self;
+    const encoded = surface.metalPostprocess(&.{
+        .command_buffer = frame.buffer.value,
+        .source_texture = source.texture.value,
+        .destination_texture = target.texture.value,
+        .width = @intCast(target.width),
+        .height = @intCast(target.height),
+        .frame_number = frame_number,
+    });
+    if (!encoded) {
+        frame.copyTexture(
+            source.texture,
+            target.texture,
+            target.width,
+            target.height,
+        );
+    }
+    return encoded;
 }
 
 fn chooseDevice() error{NoMetalDevice}!objc.Object {

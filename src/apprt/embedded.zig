@@ -83,6 +83,24 @@ pub const App = struct {
         /// Write bytes that should be sent to the host-managed transport.
         /// This is used by external termio backends (for example on visionOS).
         termio_write: ?*const fn (SurfaceUD, [*]const u8, usize) callconv(.c) void = null,
+
+        /// Encode host-owned Metal post-processing into Ghostty's active
+        /// command buffer. Returning false leaves Ghostty's plain frame in
+        /// place. This callback is only invoked by the Metal renderer.
+        metal_postprocess: ?*const fn (
+            SurfaceUD,
+            *const MetalPostprocessFrame,
+        ) callconv(.c) bool = null,
+    };
+
+    /// C type: ghostty_metal_postprocess_frame_s
+    pub const MetalPostprocessFrame = extern struct {
+        command_buffer: ?*anyopaque,
+        source_texture: ?*anyopaque,
+        destination_texture: ?*anyopaque,
+        width: u32,
+        height: u32,
+        frame_number: u64,
     };
 
     /// This is the key event sent for ghostty_surface_key and
@@ -519,6 +537,126 @@ test "normalize script input keeps blank and comment lines" {
     );
 }
 
+test "embedded Metal postprocess callback is optional" {
+    const testing = std.testing;
+
+    var app: App = undefined;
+    app.opts = testOptions(null);
+
+    var surface = testSurface(&app);
+    try testing.expect(!surface.hasMetalPostprocess());
+    try testing.expect(!surface.metalPostprocess(&testMetalPostprocessFrame()));
+}
+
+test "embedded Metal postprocess callback receives frame and returns result" {
+    const testing = std.testing;
+
+    var state: TestMetalPostprocessState = .{
+        .expected_frame = testMetalPostprocessFrame(),
+        .result = false,
+    };
+    var app: App = undefined;
+    app.opts = testOptions(testMetalPostprocess);
+    app.opts.userdata = &state;
+
+    var surface = testSurface(&app);
+    try testing.expect(surface.hasMetalPostprocess());
+    try testing.expect(!surface.metalPostprocess(&state.expected_frame));
+    try testing.expect(state.called);
+
+    state.called = false;
+    state.result = true;
+    try testing.expect(surface.metalPostprocess(&state.expected_frame));
+    try testing.expect(state.called);
+}
+
+fn testOptions(
+    metal_postprocess: ?*const fn (
+        ?*anyopaque,
+        *const App.MetalPostprocessFrame,
+    ) callconv(.c) bool,
+) App.Options {
+    return .{
+        .wakeup = testWakeup,
+        .action = testAction,
+        .read_clipboard = testReadClipboard,
+        .confirm_read_clipboard = testConfirmReadClipboard,
+        .write_clipboard = testWriteClipboard,
+        .metal_postprocess = metal_postprocess,
+    };
+}
+
+fn testSurface(app: *App) Surface {
+    return .{
+        .app = app,
+        .platform = undefined,
+        .core_surface = undefined,
+        .content_scale = .{ .x = 1, .y = 1 },
+        .size = .{ .width = 800, .height = 600 },
+        .cursor_pos = .{ .x = -1, .y = -1 },
+    };
+}
+
+fn testMetalPostprocessFrame() App.MetalPostprocessFrame {
+    const command_buffer: *anyopaque = @ptrFromInt(0x1000);
+    const source_texture: *anyopaque = @ptrFromInt(0x2000);
+    const destination_texture: *anyopaque = @ptrFromInt(0x3000);
+
+    return .{
+        .command_buffer = command_buffer,
+        .source_texture = source_texture,
+        .destination_texture = destination_texture,
+        .width = 640,
+        .height = 480,
+        .frame_number = 42,
+    };
+}
+
+const TestMetalPostprocessState = struct {
+    expected_frame: App.MetalPostprocessFrame,
+    called: bool = false,
+    result: bool,
+};
+
+fn testMetalPostprocess(
+    userdata: ?*anyopaque,
+    frame: *const App.MetalPostprocessFrame,
+) callconv(.c) bool {
+    const state: *TestMetalPostprocessState = @ptrCast(@alignCast(userdata.?));
+    state.called = true;
+    std.testing.expectEqualDeep(state.expected_frame, frame.*) catch unreachable;
+    return state.result;
+}
+
+fn testWakeup(_: ?*anyopaque) callconv(.c) void {}
+
+fn testAction(_: *App, _: apprt.Target.C, _: apprt.Action.C) callconv(.c) bool {
+    return false;
+}
+
+fn testReadClipboard(
+    _: ?*anyopaque,
+    _: c_int,
+    _: *apprt.ClipboardRequest,
+) callconv(.c) bool {
+    return false;
+}
+
+fn testConfirmReadClipboard(
+    _: ?*anyopaque,
+    _: [*:0]const u8,
+    _: *apprt.ClipboardRequest,
+    _: apprt.ClipboardRequestType,
+) callconv(.c) void {}
+
+fn testWriteClipboard(
+    _: ?*anyopaque,
+    _: c_int,
+    _: [*]const CAPI.ClipboardContent,
+    _: usize,
+    _: bool,
+) callconv(.c) void {}
+
 /// Platform-specific configuration for libghostty.
 pub const Platform = union(PlatformTag) {
     macos: MacOS,
@@ -892,6 +1030,18 @@ pub const Surface = struct {
 
     pub fn hasExternalTermio(self: *const Surface) bool {
         return self.app.opts.termio_write != null;
+    }
+
+    pub fn hasMetalPostprocess(self: *const Surface) bool {
+        return self.app.opts.metal_postprocess != null;
+    }
+
+    pub fn metalPostprocess(
+        self: *const Surface,
+        frame: *const App.MetalPostprocessFrame,
+    ) bool {
+        const func = self.app.opts.metal_postprocess orelse return false;
+        return func(self.userdata, frame);
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -2067,7 +2217,7 @@ pub const CAPI = struct {
         };
     }
 
-    inline fn frameMouseEvent(value: terminal.Terminal.MouseEvents) FrameMouseEvent {
+    inline fn frameMouseEvent(value: terminal.MouseEvent) FrameMouseEvent {
         return switch (value) {
             .none => .none,
             .x10 => .x10,
@@ -2077,7 +2227,7 @@ pub const CAPI = struct {
         };
     }
 
-    inline fn frameMouseFormat(value: terminal.Terminal.MouseFormat) FrameMouseFormat {
+    inline fn frameMouseFormat(value: terminal.MouseFormat) FrameMouseFormat {
         return switch (value) {
             .x10 => .x10,
             .utf8 => .utf8,

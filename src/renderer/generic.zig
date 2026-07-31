@@ -196,6 +196,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Graphics API state.
         api: GraphicsAPI,
 
+        /// Runtime surface used for optional host renderer integration.
+        rt_surface: *apprt.Surface,
+
         /// The CVDisplayLink used to drive the rendering loop in
         /// sync with the display. This is void on platforms that
         /// don't support a display link.
@@ -786,6 +789,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Graphics API stuff
                 .api = api,
+                .rt_surface = options.rt_surface,
                 .swap_chain = swap_chain,
                 .display_link = display_link,
             };
@@ -1015,6 +1019,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// True if our renderer has animations so that a higher frequency
         /// timer is used.
         pub fn hasAnimations(self: *const Self) bool {
+            if (comptime @hasDecl(GraphicsAPI, "hostPostprocess")) {
+                return self.has_custom_shaders or
+                    self.rt_surface.hasMetalPostprocess();
+            }
             return self.has_custom_shaders;
         }
 
@@ -1506,7 +1514,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // If we have custom shaders, make sure we have the
             // custom shader state in our frame state, otherwise
             // if we have a state but don't need it we remove it.
-            if (self.has_custom_shaders) {
+            const has_host_postprocess = if (comptime @hasDecl(GraphicsAPI, "hostPostprocess"))
+                self.rt_surface.hasMetalPostprocess()
+            else
+                false;
+            if (self.has_custom_shaders or has_host_postprocess) {
                 if (frame.custom_shader_state == null) {
                     frame.custom_shader_state = try .init(self.api);
                     try frame.custom_shader_state.?.resize(
@@ -1688,33 +1700,50 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 );
             }
 
-            // If we have custom shaders, then we render them.
+            // If needed, render through the intermediate shader state before
+            // the final target. Host post-processing uses the same source even
+            // when no custom shaders are configured.
             if (frame.custom_shader_state) |*state| {
-                // Sync our uniforms.
-                try state.uniforms.sync(&.{self.custom_shader_uniforms});
+                if (self.has_custom_shaders) {
+                    // Sync our uniforms.
+                    try state.uniforms.sync(&.{self.custom_shader_uniforms});
 
-                for (self.shaders.post_pipelines, 0..) |pipeline, i| {
-                    defer state.swap();
+                    for (self.shaders.post_pipelines, 0..) |pipeline, i| {
+                        defer state.swap();
 
-                    var pass = frame_ctx.renderPass(&.{.{
-                        .target = if (i < self.shaders.post_pipelines.len - 1)
-                            .{ .texture = state.front_texture }
-                        else
-                            .{ .target = frame.target },
-                        .clear_color = .{ 0.0, 0.0, 0.0, 0.0 },
-                    }});
-                    defer pass.complete();
+                        var pass = frame_ctx.renderPass(&.{.{
+                            .target = if (has_host_postprocess or
+                                i < self.shaders.post_pipelines.len - 1)
+                                .{ .texture = state.front_texture }
+                            else
+                                .{ .target = frame.target },
+                            .clear_color = .{ 0.0, 0.0, 0.0, 0.0 },
+                        }});
+                        defer pass.complete();
 
-                    pass.step(.{
-                        .pipeline = pipeline,
-                        .uniforms = state.uniforms.buffer,
-                        .textures = &.{state.back_texture},
-                        .samplers = &.{state.sampler},
-                        .draw = .{
-                            .type = .triangle,
-                            .vertex_count = 3,
-                        },
-                    });
+                        pass.step(.{
+                            .pipeline = pipeline,
+                            .uniforms = state.uniforms.buffer,
+                            .textures = &.{state.back_texture},
+                            .samplers = &.{state.sampler},
+                            .draw = .{
+                                .type = .triangle,
+                                .vertex_count = 3,
+                            },
+                        });
+                    }
+                }
+
+                if (comptime @hasDecl(GraphicsAPI, "hostPostprocess")) {
+                    if (has_host_postprocess) {
+                        _ = self.api.hostPostprocess(
+                            &frame_ctx,
+                            state.back_texture,
+                            &frame.target,
+                            self.rt_surface,
+                            @intCast(@max(self.custom_shader_uniforms.frame, 0)),
+                        );
+                    }
                 }
             }
         }

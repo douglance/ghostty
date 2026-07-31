@@ -67,7 +67,8 @@ extension Ghostty {
                 write_clipboard_cb: { userdata, loc, content, len, confirm in
                     App.writeClipboard(userdata, location: loc, content: content, len: len, confirm: confirm) },
                 close_surface_cb: { userdata, processAlive in App.closeSurface(userdata, processAlive: processAlive) },
-                termio_write_cb: nil
+                termio_write_cb: nil,
+                metal_postprocess_cb: nil
             )
 
             // Create the ghostty app.
