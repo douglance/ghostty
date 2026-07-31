@@ -956,7 +956,7 @@ pub const Surface = struct {
         alloc: Allocator,
         command: []const u8,
     ) ![:0]const u8 {
-        const trimmed = std.mem.trimRight(u8, command, "\r\n");
+        const trimmed = std.mem.trimEnd(u8, command, "\r\n");
 
         var line = try alloc.alloc(u8, trimmed.len + 1);
         defer alloc.free(line);
@@ -2169,7 +2169,7 @@ pub const CAPI = struct {
         return switch (cell.content_tag) {
             .bg_color_palette => .{
                 .tag = .palette,
-                .palette_index = cell.content.color_palette,
+                .palette_index = cell.content.color_palette.data,
             },
             .bg_color_rgb => .{
                 .tag = .rgb,
@@ -2279,7 +2279,7 @@ pub const CAPI = struct {
             null,
         );
         while (row_it.next()) |pin| : (row_index += 1) {
-            const page = &pin.node.data;
+            const page = pin.node.page();
             const rac = pin.rowAndCell();
             const row = rac.row;
             line_wrapped[row_index] = @intFromBool(row.wrap);
