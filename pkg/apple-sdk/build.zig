@@ -36,6 +36,21 @@ pub fn build(b: *std.Build) !void {
     _ = optimize;
 }
 
+/// Return the target used only for generating C bindings. Aro 0.16 does not
+/// yet emit the required Darwin environment macro for visionOS, whose C ABI
+/// is otherwise compatible with iOS for the headers Ghostty translates.
+pub fn translateTarget(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+) std.Build.ResolvedTarget {
+    if (target.result.os.tag != .visionos) return target;
+
+    var query = target.query;
+    query.os_tag = .ios;
+    query.os_version_min = null;
+    return b.resolveTargetQuery(query);
+}
+
 /// Fetch or load the paths for the proper Apple SDK for libc and
 /// frameworks. When running on a Darwin host, this uses the native
 /// SDK installed on the system via `xcrun`. When cross-compiling from

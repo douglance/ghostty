@@ -75,12 +75,13 @@ pub fn build(b: *std.Build) !void {
     translate: {
         const translate_c = b.lazyImport(@This(), "translate_c") orelse break :translate;
         const translate_c_dep = b.lazyDependency("translate_c", .{}) orelse break :translate;
+        const translate_target = apple_sdk.translateTarget(b, target);
         const macos_c: translate_c.Translator = .init(translate_c_dep, .{
             .c_source_file = b.addWriteFiles().add(
                 "macos_c.h",
                 if (target.result.os.tag == .macos) &c_source_macos else &c_source_other,
             ),
-            .target = target,
+            .target = translate_target,
             .optimize = optimize,
             .libc_file = if (target.result.os.tag.isDarwin()) libc_file: {
                 switch (try apple_sdk.pathsForTarget(b, target.result)) {
@@ -89,10 +90,21 @@ pub fn build(b: *std.Build) !void {
             } else null,
         });
 
+        const macos_c_mod = if (target.result.os.tag == .visionos) module: {
+            const translated = b.createModule(.{
+                .root_source_file = macos_c.output_file,
+                .target = target,
+                .optimize = optimize,
+            });
+            translated.addImport("c_builtins", translate_c_dep.module("c_builtins"));
+            translated.addImport("helpers", translate_c_dep.module("helpers"));
+            break :module translated;
+        } else macos_c.mod;
+
         // Blocks need to be enabled to use MacOS headers
         macos_c.run.addArg("-fblocks");
 
-        module.addImport("macos_c", macos_c.mod);
+        module.addImport("macos_c", macos_c_mod);
     }
 
     const lib = b.addLibrary(.{
