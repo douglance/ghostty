@@ -120,8 +120,10 @@ pub const ApplePlatform = enum {
     macos_universal,
     ios,
     ios_simulator,
-    // tvOS, watchOS, and visionOS are not yet supported by Zig's
-    // standard library (missing PATH_MAX, mcontext fields, etc.).
+    visionos,
+    visionos_simulator,
+    // tvOS and watchOS are not yet supported by Zig's standard library
+    // (missing PATH_MAX, mcontext fields, etc.).
 
     /// Platforms that have device + simulator pairs, gated on SDK detection.
     const sdk_platforms = [_]struct {
@@ -130,6 +132,11 @@ pub const ApplePlatform = enum {
         simulator: ApplePlatform,
     }{
         .{ .os_tag = .ios, .device = .ios, .simulator = .ios_simulator },
+        .{
+            .os_tag = .visionos,
+            .device = .visionos,
+            .simulator = .visionos_simulator,
+        },
     };
 };
 
